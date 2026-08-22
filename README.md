@@ -5,6 +5,80 @@ Public code release for ["Swept Volumes via Spacetime Numerical Continuation"](h
 
 An up-to-date, maintained version of this code is implemented into our new python geometry processing library [Gpytoolbox](https://gpytoolbox.org). See the swept volume documentation and examples [here](https://gpytoolbox.org/copyleft/swept_volume/).
 
+# Python bindings (nanobind)
+
+This repository also provides Python bindings built with
+[nanobind](https://github.com/wjakob/nanobind). All dependencies (libigl v2.6.0
+and Eigen) are fetched automatically via CMake — no submodules or system
+installs required.
+
+```bash
+pip install .            # builds the C++ core + extension via scikit-build-core
+pip install .[test]      # also pulls pytest + numba
+```
+
+## Defining the trajectory: zero-overhead `transform(t)`
+
+The spacetime continuation evaluates the trajectory `transform(t)` an enormous
+number of times. To keep that hot loop free of any Python / GIL / NumPy
+overhead, write the transform in Python and compile it to native machine code
+with [`numba.cfunc`](https://numba.readthedocs.io/en/stable/user/cfunc.html)
+using the native ABI
+
+```
+void transform(double t, double *A, double *Adot)
+```
+
+where `A` and `Adot` point directly at the storage of the destination 4×4 pose
+and its time-derivative (column-major, matching Eigen). The
+[`@native_transform`](python/swept_volumes/__init__.py) decorator wires up the
+`numba.farray` views for you:
+
+```python
+import math, numpy as np
+import igl                                   # or any loader for V, F
+from swept_volumes import native_transform, NativeTransform, swept_volume, ContouringMethod
+
+@native_transform
+def spin(t, A, Adot):
+    # A, Adot are Fortran-order (column-major) 4x4 views.
+    c, s = math.cos(t), math.sin(t)
+    A[0, 0] = c;  A[0, 1] = -s; A[0, 3] = t
+    A[1, 0] = s;  A[1, 1] = c
+    A[2, 2] = 1.0; A[3, 3] = 1.0
+    Adot[0, 0] = -s; Adot[0, 1] = -c; Adot[0, 3] = 1.0
+    Adot[1, 0] = c;  Adot[1, 1] = -s
+
+U, G, strobo_V, strobo_F = swept_volume(
+    V, F, NativeTransform(spin),
+    eps=0.02, num_seeds=100,
+    contouring=ContouringMethod.MarchingCubes,   # or DualContouring
+)
+```
+
+The function-pointer address (`cfunc.address`) is extracted once at the C++
+boundary; every inner evaluation is then an ordinary indirect native call. The
+`NativeTransform` object keeps the compiled `cfunc` alive for the duration of
+the call, and the heavy computation runs with the GIL released.
+
+Other entry points: `swept_volume_keyframes(V, F, [poses...])` (the original
+keyframe trajectory), and `swept_volume_pyfunc(V, F, fn)` (a slow reference path
+where `fn(t) -> (A, Adot)` is a plain Python callable — for debugging only).
+
+## Per-call overhead
+
+`python python/benchmark.py` measures the cost of one `transform(t)` evaluation:
+
+| mechanism        | ns/call | vs C++ |
+|------------------|--------:|-------:|
+| C++ baseline     |   ~33   |  1.0×  |
+| numba cfunc      |   ~28   |  0.8×  |
+| python callable  | ~5900   | ~180×  |
+
+The numba `cfunc` is a single indirect native call, indistinguishable from a
+runtime C++ function pointer; a plain Python callable is ~180× slower. Output is
+bit-identical across all three delivery mechanisms (see `tests/`).
+
 ## Installation
 
 To install this library, please start by cloning the repository recursively

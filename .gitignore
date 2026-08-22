@@ -32,3 +32,7 @@ __pycache__/
 *.pyc
 data/experiments/
 .pytest_cache/
+/swept-volumes-bench
+/swept-volumes-gui
+swept_output/
+native_output/
