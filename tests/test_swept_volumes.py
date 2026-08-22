@@ -143,3 +143,36 @@ def test_pyfunc_is_much_slower():
     t_py = sv.bench_pyfunc(spin_py, n) / n
     t_native = sv.bench_native(NativeTransform(spin), n) / n
     assert t_py > 10.0 * t_native, (t_py, t_native)
+
+
+def _read_obj(path):
+    Vs, Fs = [], []
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("v "):
+                Vs.append([float(x) for x in line.split()[1:4]])
+            elif line.startswith("f "):
+                Fs.append([int(x.split("/")[0]) - 1 for x in line.split()[1:4]])
+    return np.array(Vs, float), np.array(Fs, np.int32)
+
+
+@pytest.mark.slow
+def test_bunny_end_to_end(tmp_path):
+    import os
+
+    bunny = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "bunny.obj"
+    )
+    if not os.path.exists(bunny):
+        pytest.skip("data/bunny.obj not present")
+    V, F = _read_obj(bunny)
+    U, G, _, _ = sv.swept_volume(
+        V, F, NativeTransform(spin), eps=0.06, num_seeds=100,
+        dir_name=str(tmp_path / "bunny")
+    )
+    assert U.shape[0] > 1000 and G.shape[0] > 1000
+    # native transform and pure-Python callable agree on the real mesh too.
+    Up, Gp, _, _ = sv.swept_volume_pyfunc(
+        V, F, spin_py, eps=0.06, num_seeds=100, dir_name=str(tmp_path / "bunny_py")
+    )
+    assert U.shape == Up.shape and G.shape == Gp.shape
