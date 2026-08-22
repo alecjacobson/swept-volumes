@@ -1,4 +1,7 @@
 #include <vector>
+#include <limits>
+#include <Eigen/Geometry>
+#include "swept_volume.h"
 #include <igl/doublearea.h>
 #include <igl/per_face_normals.h>
 #include <igl/parallel_for.h>
@@ -50,14 +53,7 @@ Eigen::Quaternion <double> logq(const Eigen::Quaternion <double> &q) {
     return res;
 }
 
-void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const std::vector<Eigen::Matrix4d> Transformations, const double eps, const int num_seeds, const std::string dir_name, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
-    double iso = 0.001;
-    
-    auto sgn = [](double val) -> double {
-        return (double) ((double(0) < val) - (val < double(0)));
-    };
-    
-    
+SweptTransform make_keyframe_transform(const std::vector<Eigen::Matrix4d> & Transformations){
     Eigen::VectorXd time_keyframes;
     time_keyframes.setLinSpaced(Transformations.size(),0.0,1.0);
     std::vector<Eigen::RowVector3d> tangents;
@@ -81,7 +77,7 @@ void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Ei
                        Eigen::RowVector3d &,
                        Eigen::RowVector3d &,
                        Eigen::Matrix3d &,
-                       Eigen::Matrix3d &)> interpolate_position = [&](const double t,
+                       Eigen::Matrix3d &)> ip = [=](const double t,
                                                                       Eigen::RowVector3d & xt,
                                                                       Eigen::RowVector3d & vt,
                                                                       Eigen::Matrix3d & Rt,
@@ -170,17 +166,93 @@ void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Ei
                            //                                  0.0, 0.0, 0.0;
                            return true;
                        };
-    
-    
+    return [ip](double t, Eigen::Matrix4d & A, Eigen::Matrix4d & Adot){
+        Eigen::RowVector3d xt, vt;
+        Eigen::Matrix3d Rt, VRt;
+        ip(t, xt, vt, Rt, VRt);
+        A.setIdentity();
+        A.topLeftCorner<3,3>() = Rt;
+        A.block<3,1>(0,3) = xt.transpose();
+        Adot.setZero();
+        Adot.topLeftCorner<3,3>() = VRt;
+        Adot.block<3,1>(0,3) = vt.transpose();
+    };
+}
+
+// Dual-contour the swept volume on the sparse cell set (CS values, CV verts,
+// CI cells).  f is the swept SDF (min over sampled t of the stamped signed
+// distance); f_grad is its normalised finite-difference gradient.
+static void dual_contour_sparse(
+    const Eigen::MatrixXd & V, const Eigen::MatrixXi & F,
+    igl::AABB<Eigen::MatrixXd,3> & tree,
+    const igl::FastWindingNumberBVH & fwn_bvh,
+    const SweptTransform & transform,
+    const double iso, const double eps, const int stamps,
+    const Eigen::VectorXd & CS, const Eigen::MatrixXd & CV, const Eigen::MatrixXi & CI,
+    Eigen::MatrixXd & U, Eigen::MatrixXi & G)
+{
+    const int nsteps = std::max(2, stamps);
+    auto swept_sdf = [&](const Eigen::RowVector3d & P) -> double {
+        double best = std::numeric_limits<double>::infinity();
+        Eigen::Matrix4d A, Adot;
+        for (int k = 0; k <= nsteps; ++k) {
+            const double t = double(k)/double(nsteps);
+            transform(t, A, Adot);
+            const Eigen::Matrix3d Rt = A.topLeftCorner<3,3>();
+            const Eigen::RowVector3d xt = A.block<3,1>(0,3).transpose();
+            const Eigen::RowVector3d pos = ((Rt.inverse())*((P - xt).transpose())).transpose();
+            Eigen::VectorXd w;
+            igl::fast_winding_number(fwn_bvh, 2.0, pos, w);
+            const double s = 1.0 - 2.0*w(0);
+            int i; Eigen::RowVector3d c;
+            const double sqrd = tree.squared_distance(V, F, pos, i, c);
+            best = std::min(best, s*std::sqrt(sqrd) - iso);
+        }
+        return best;
+    };
+    std::function<double(const Eigen::RowVector3d &)> f =
+        [&](const Eigen::RowVector3d & P){ return swept_sdf(P); };
+    std::function<Eigen::RowVector3d(const Eigen::RowVector3d &)> f_grad =
+        [&](const Eigen::RowVector3d & P){
+            const double h = 0.5*eps;
+            Eigen::RowVector3d g;
+            for (int d = 0; d < 3; ++d) {
+                Eigen::RowVector3d dp = Eigen::RowVector3d::Zero();
+                dp(d) = h;
+                g(d) = (swept_sdf(P+dp) - swept_sdf(P-dp))/(2.0*h);
+            }
+            const double n = g.norm();
+            if (n > 0.0) g /= n;
+            return g;
+        };
+    const Eigen::RowVector3d step(eps, eps, eps);
+    igl::dual_contouring(f, f_grad, step, CS, CV, CI,
+                         /*constrained=*/false, /*triangles=*/true, /*root_finding=*/false,
+                         U, G);
+}
+
+static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const SweptTransform & transform, const double eps, const int num_seeds, const std::string dir_name, const ContouringMethod contouring, const std::vector<Eigen::Matrix4d>* TransformationsPtr, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
+    double iso = 0.001;
+    auto sgn = [](double val) -> double {
+        return (double) ((double(0) < val) - (val < double(0)));
+    };
+    (void) sgn;
+    auto interpolate_position = [&](const double t, Eigen::RowVector3d & xt, Eigen::RowVector3d & vt, Eigen::Matrix3d & Rt, Eigen::Matrix3d & VRt)->bool{
+        Eigen::Matrix4d A, Adot;
+        transform(t, A, Adot);
+        Rt = A.topLeftCorner<3,3>();
+        xt = A.block<3,1>(0,3).transpose();
+        VRt = Adot.topLeftCorner<3,3>();
+        vt = Adot.block<3,1>(0,3).transpose();
+        return true;
+    };
+
     igl::AABB<Eigen::MatrixXd,3> tree;
     tree.init(V,F);
     igl::FastWindingNumberBVH fwn_bvh;
     int order = 2;
     igl::fast_winding_number(V,F,order,fwn_bvh);
-    igl::WindingNumberAABB<Eigen::RowVector3d,Eigen::MatrixXd,Eigen::MatrixXi> hier;
-    hier.set_mesh(V,F);
-    hier.grow();
-    
+
     
     //    /// PROFILING
     const auto & tictoc = []()
@@ -387,16 +459,22 @@ void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Ei
     std::system((make_dir + dir_name).c_str());
     Eigen::MatrixXd Umc;
     Eigen::MatrixXi Gmc;
-    igl::copyleft::marching_cubes(CS,CV,CI,0.0,U,G); // our mesh
+    if (contouring == ContouringMethod::DualContouring) {
+        dual_contour_sparse(V, F, tree, fwn_bvh, transform, iso, eps, 100, CS, CV, CI, U, G);
+    } else {
+        igl::copyleft::marching_cubes(CS,CV,CI,0.0,U,G); // our mesh
+    }
 
 
     igl::writeOBJ(dir_name + "/input.obj",V,F);
-    write_transformation(dir_name + "/transformations.dmat",Transformations);
+    if (TransformationsPtr) {
+        write_transformation(dir_name + "/transformations.dmat",*TransformationsPtr);
+    }
     igl::writeOBJ(dir_name + "/ours.obj",U,G);
     
     
     // Strobo
-    const auto & transform = [&](const double t)->Eigen::Affine3d
+    const auto & transform_affine = [&](const double t)->Eigen::Affine3d
     {
         Eigen::Affine3d T = Eigen::Affine3d::Identity();
         Eigen::Matrix3d VRt,Rt;
@@ -440,7 +518,7 @@ void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Ei
         tictoc();
         // Call distances
         Eigen::VectorXd S;
-        igl::swept_volume_signed_distance(V,F,transform,div,GV,res,eps,iso,S);
+        igl::swept_volume_signed_distance(V,F,transform_affine,div,GV,res,eps,iso,S);
         igl::copyleft::marching_cubes(S,GV,res(0),res(1),res(2),U_10,G_10);
         strobo_V_list.push_back(U_10);
         strobo_F_list.push_back(G_10);
@@ -449,6 +527,29 @@ void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Ei
 
 }
 
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+// Functor-driven (with UVs)
+void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const SweptTransform & transform, const double eps, const int num_seeds, const std::string dir_name, const ContouringMethod contouring, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
+    run(V,F,UV,UVF,transform,eps,num_seeds,dir_name,contouring,nullptr,U,G,strobo_V_list,strobo_F_list);
+}
+
+// Functor-driven (no UVs)
+void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const SweptTransform & transform, const double eps, const int num_seeds, const std::string dir_name, const ContouringMethod contouring, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
+    Eigen::MatrixXd UV(0,0);
+    Eigen::MatrixXi UVF(0,0);
+    run(V,F,UV,UVF,transform,eps,num_seeds,dir_name,contouring,nullptr,U,G,strobo_V_list,strobo_F_list);
+}
+
+// Keyframe (with UVs) -- MarchingCubes, backwards compatible
+void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const std::vector<Eigen::Matrix4d> Transformations, const double eps, const int num_seeds, const std::string dir_name, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
+    SweptTransform tf = make_keyframe_transform(Transformations);
+    run(V,F,UV,UVF,tf,eps,num_seeds,dir_name,ContouringMethod::MarchingCubes,&Transformations,U,G,strobo_V_list,strobo_F_list);
+}
+
+// Keyframe (no UVs) -- MarchingCubes, backwards compatible
 void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const std::vector<Eigen::Matrix4d> Transformations, const double eps, const int num_seeds, const std::string dir_name, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
     Eigen::MatrixXd UV;
     UV.resize(0,0);
