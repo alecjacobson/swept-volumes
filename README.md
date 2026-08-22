@@ -12,10 +12,24 @@ This repository also provides Python bindings built with
 and Eigen) are fetched automatically via CMake — no submodules or system
 installs required.
 
+![Swept volume of a bar orbiting on a cyclic trajectory, rendered with polyscope: semi-transparent swept volume, soft shadows, and the animated shape sweeping inside.](assets/swept_volume_demo.gif)
+
+*A bar swept along a cyclic orbit. The translucent surface is the computed swept
+volume; the solid bar is the input shape animated along the trajectory. Generated
+by [`python/example_polyscope.py`](python/example_polyscope.py).*
+
+## Installation
+
 ```bash
 pip install .            # builds the C++ core + extension via scikit-build-core
 pip install .[test]      # also pulls pytest + numba
+
+# for the animated demo below:
+pip install numba polyscope imageio pillow
 ```
+
+A C++17 compiler and CMake ≥ 3.20 are required; the first build fetches and
+compiles libigl/Eigen and may take a few minutes.
 
 ## Defining the trajectory: zero-overhead `transform(t)`
 
@@ -78,6 +92,19 @@ where `fn(t) -> (A, Adot)` is a plain Python callable — for debugging only).
 The numba `cfunc` is a single indirect native call, indistinguishable from a
 runtime C++ function pointer; a plain Python callable is ~180× slower. Output is
 bit-identical across all three delivery mechanisms (see `tests/`).
+
+## Animated demo
+
+The GIF at the top is produced end-to-end by
+[`python/example_polyscope.py`](python/example_polyscope.py): it defines a cyclic
+`@native_transform`, computes the swept volume, and renders it with
+[polyscope](https://polyscope.run) — semi-transparent swept volume, soft ground
+shadows, and the input shape animated along the trajectory. It runs headless (no
+display needed) via polyscope's EGL backend:
+
+```bash
+python python/example_polyscope.py --gif assets/swept_volume_demo.gif
+```
 
 ## Installation
 

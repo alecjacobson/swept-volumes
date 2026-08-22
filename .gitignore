@@ -36,3 +36,4 @@ data/experiments/
 /swept-volumes-gui
 swept_output/
 native_output/
+imgui.ini
