@@ -115,13 +115,19 @@ Both back-ends run on **the same sparse cells** produced by the continuation —
 there is no dense grid and no re-sampling ("stamping") of the field:
 
 - **Marching cubes** consumes the cells `(CS, CV, CI)` directly.
-- **Dual contouring** consumes those same cells expressed as their unique set of
-  edges, using the continuation's own SDF values `CS` and, for normals, the
-  analytic gradient at each grid vertex. By the envelope theorem, at the argmin
-  pose `t*` (which the continuation already reports per vertex) the swept-SDF
-  gradient equals the brush-SDF gradient there — the direction to the closest
-  surface point — so no finite differences or differentiating through `t` are
-  needed. Both cost essentially the same.
+- **Dual contouring** consumes those same cells re-expressed as their unique set
+  of edges (libigl's sparse `dual_contouring` wants a `#edges×2` list, not the
+  `#cells×8` matrix). It uses the continuation's own values `CS` for the edge
+  crossings (exactly like marching cubes) and, for the QEF normals, the
+  normalized central finite-difference gradient of `CS` on the grid (lightly
+  smoothed over grid neighbours). `CS` is accurate to roughly the continuation
+  tolerance, so its gradient gives cleaner normals than a normal derived from the
+  much coarser per-vertex argmin times. Both back-ends cost essentially the same
+  and produce watertight surfaces.
+
+The implementation is validated on analytic geometry (`experiments/`): a
+translating cube whose swept volume is exactly a larger box is dual-contoured to
+within `1e-4` of the true box, sharp edges included.
 
 Dual contouring is the method used for the figures in the paper (it recovers
 sharp creases); pass `contouring=ContouringMethod.DualContouring` to use it.
@@ -194,6 +200,6 @@ will recreate `experiment-name` *but with the armadillo as input*. We can even a
 
 
 ## Known Issues
-This released code originally used marching cubes for surface generation, while the paper examples use dual contouring. Dual contouring is now available too (see [Contouring](#contouring-marching-cubes-or-dual-contouring) above): it runs on the same sparse continuation cells, using the continuation's SDF values and analytic (envelope-theorem) normals. All other elements in the algorithm are reproduced here exactly as were used to produce the examples in our paper.
+This released code originally used marching cubes for surface generation, while the paper examples use dual contouring. Dual contouring is now available too (see [Contouring](#contouring-marching-cubes-or-dual-contouring) above): it runs on the same sparse continuation cells, using the continuation's SDF values and their grid gradient for normals. All other elements in the algorithm are reproduced here exactly as were used to produce the examples in our paper.
 
 Please do not hesitate to contact [sgsellan@cs.toronto.edu](mailto:sgsellan@cs.toronto.edu) if you find any issues or bugs in this code, or you struggle to run it in any way.
