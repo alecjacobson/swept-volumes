@@ -37,3 +37,5 @@ data/experiments/
 swept_output/
 native_output/
 imgui.ini
+/sparse-dc-experiment
+/swept-analytic-experiment

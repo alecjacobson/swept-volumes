@@ -155,7 +155,7 @@ def main():
 
     swept = ps.register_surface_mesh("swept volume", U, G, smooth_shade=True)
     swept.set_color((0.30, 0.55, 0.95))
-    swept.set_transparency(0.35)
+    swept.set_transparency(0.8)
     swept.set_material("wax")
 
     shape = ps.register_surface_mesh("shape", V.copy(), F, smooth_shade=False)

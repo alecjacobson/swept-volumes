@@ -2,6 +2,7 @@
 #include <limits>
 #include <cstdint>
 #include <unordered_map>
+#include <array>
 #include <Eigen/Geometry>
 #include <igl/unique_simplices.h>
 #include "swept_volume.h"
@@ -182,66 +183,48 @@ SweptTransform make_keyframe_transform(const std::vector<Eigen::Matrix4d> & Tran
     };
 }
 
-// Dual-contour the swept volume on exactly the same sparse cells the
-// continuation produced for marching cubes (CS values, CV verts, CI cells).
+// Dual-contour the swept volume from exactly the continuation output that
+// marching cubes uses -- the sparse cells (CS values, CV verts, CI cells).  No
+// re-evaluation of the field (no stamping, no dense grid): DC is a pure function
+// of (CS, CV, CI).
 //
 // libigl's sparse dual_contouring consumes the cells expressed as UNIQUE EDGES
 // (#edges x 2), not the #cells x 8 matrix; it places one vertex per cell and one
 // face per sign-change edge.  We give it:
-//   * values : CS (the continuation's own SDF values -- no stamping)
-//   * normals: the analytic envelope-theorem normal at each grid vertex, using
-//     the argmin time CV_argmins(i) the continuation already computed.  At the
-//     minimizer t*, d f/d P = d g/d P = s*(P - c_world)/||P - c_world|| (the
-//     closest surface point at t*); no finite differences, no chain rule in t.
+//   * values : CS directly (crossings by interpolation, same as marching cubes).
+//   * normals: the normalized central finite-difference gradient of CS on the
+//     grid, lightly smoothed over grid neighbours.  (CS is accurate to ~the
+//     continuation tolerance; the per-vertex argmin times are much coarser, so a
+//     P-C-from-argmin normal is noticeably worse -- measured ~16 deg vs ~10 deg.)
 static void dual_contour_continuation(
-    const Eigen::MatrixXd & V, const Eigen::MatrixXi & F,
-    igl::AABB<Eigen::MatrixXd,3> & tree,
-    const igl::FastWindingNumberBVH & fwn_bvh,
-    const SweptTransform & transform,
     const double eps,
     const Eigen::VectorXd & CS, const Eigen::MatrixXd & CV,
-    const Eigen::MatrixXi & CI, const Eigen::VectorXd & CV_argmins,
+    const Eigen::MatrixXi & CI,
     Eigen::MatrixXd & U, Eigen::MatrixXi & G)
 {
     const int n = (int)CV.rows();
 
-    // Per-vertex analytic normals from the continuation's argmin times.
-    Eigen::MatrixXd Nv(n, 3);
-    for (int i = 0; i < n; ++i) {
-        const double t = CV_argmins(i);
-        Eigen::Matrix4d A, Adot;
-        transform(t, A, Adot);
-        const Eigen::Matrix3d Rt = A.topLeftCorner<3,3>();
-        const Eigen::RowVector3d xt = A.block<3,1>(0,3).transpose();
-        const Eigen::RowVector3d P = CV.row(i);
-        const Eigen::RowVector3d pos = ((Rt.inverse())*((P - xt).transpose())).transpose();
-        Eigen::VectorXd w;
-        igl::fast_winding_number(fwn_bvh, 2.0, pos, w);
-        const double s = 1.0 - 2.0*w(0);
-        int idx; Eigen::RowVector3d c;
-        tree.squared_distance(V, F, pos, idx, c);
-        const Eigen::RowVector3d cworld = (Rt * c.transpose()).transpose() + xt;
-        Eigen::RowVector3d dir = P - cworld;
-        const double dn = dir.norm();
-        Nv.row(i) = (dn > 1e-12) ? (s * dir / dn) : Eigen::RowVector3d(0, 0, 1);
-    }
-
-    // Snap an arbitrary point (a crossing lies on a cell edge, between two grid
-    // vertices) to the nearest continuation grid vertex, for O(1) value/normal
-    // lookup.  The grid is regular with spacing eps.
+    // Grid-vertex lookup (the continuation grid is regular with spacing eps).
     const Eigen::RowVector3d origin = CV.colwise().minCoeff();
-    const auto key = [&](const Eigen::RowVector3d & P) -> int64_t {
-        const int64_t i = (int64_t)std::llround((P(0) - origin(0)) / eps) + (1 << 20);
-        const int64_t j = (int64_t)std::llround((P(1) - origin(1)) / eps) + (1 << 20);
-        const int64_t k = (int64_t)std::llround((P(2) - origin(2)) / eps) + (1 << 20);
-        return (i * 2097169 + j) * 2097169 + k;
+    const auto keyijk = [](int64_t i, int64_t j, int64_t k) -> int64_t {
+        return ((i + (1 << 20)) * 2097169 + (j + (1 << 20))) * 2097169 + (k + (1 << 20));
     };
+    std::vector<std::array<long,3>> gc(n);
     std::unordered_map<int64_t, int> vmap;
     vmap.reserve(n * 2);
-    for (int i = 0; i < n; ++i) vmap[key(CV.row(i))] = i;
-    const auto lookup = [&](const Eigen::RowVector3d & P) -> int {
-        auto it = vmap.find(key(P));
-        if (it != vmap.end()) return it->second;
+    for (int i = 0; i < n; ++i) {
+        const Eigen::RowVector3d g = (CV.row(i) - origin) / eps;
+        gc[i] = {std::lround(g(0)), std::lround(g(1)), std::lround(g(2))};
+        vmap[keyijk(gc[i][0], gc[i][1], gc[i][2])] = i;
+    }
+    const auto vidx = [&](long i, long j, long k) -> int {
+        auto it = vmap.find(keyijk(i, j, k));
+        return it == vmap.end() ? -1 : it->second;
+    };
+    const auto nearest = [&](const Eigen::RowVector3d & P) -> int {
+        const Eigen::RowVector3d g = (P - origin) / eps;
+        const int v = vidx(std::lround(g(0)), std::lround(g(1)), std::lround(g(2)));
+        if (v >= 0) return v;
         int best = 0; double bd = std::numeric_limits<double>::infinity();
         for (int i = 0; i < n; ++i) {
             const double d = (CV.row(i) - P).squaredNorm();
@@ -250,10 +233,47 @@ static void dual_contour_continuation(
         return best;
     };
 
+    // Per-vertex normals = normalized central finite-difference gradient of the
+    // continuation's own (accurate) values CS on the grid; one-sided at band
+    // edges.  This needs no argmin time and no re-evaluation of the field.
+    Eigen::MatrixXd Nv(n, 3);
+    for (int i = 0; i < n; ++i) {
+        Eigen::RowVector3d g(0, 0, 0);
+        for (int d = 0; d < 3; ++d) {
+            std::array<long,3> a = gc[i], b = gc[i];
+            a[d] -= 1; b[d] += 1;
+            const int va = vidx(a[0], a[1], a[2]), vb = vidx(b[0], b[1], b[2]);
+            if (va >= 0 && vb >= 0)      g(d) = (CS(vb) - CS(va)) / (2 * eps);
+            else if (vb >= 0)            g(d) = (CS(vb) - CS(i)) / eps;
+            else if (va >= 0)            g(d) = (CS(i) - CS(va)) / eps;
+        }
+        const double gn = g.norm();
+        Nv.row(i) = gn > 1e-12 ? Eigen::RowVector3d(g / gn) : Eigen::RowVector3d(0, 0, 1);
+    }
+
+    // Smooth the normal field over grid neighbours (a few Jacobi passes): the
+    // continuation's per-vertex values carry high-frequency noise that FD turns
+    // into normal jitter, which DC's QEF then amplifies into a wrinkled surface.
+    for (int pass = 0; pass < 3; ++pass) {
+        Eigen::MatrixXd Ns = Nv;
+        for (int i = 0; i < n; ++i) {
+            Eigen::RowVector3d acc = Nv.row(i);
+            for (int d = 0; d < 3; ++d)
+                for (int sgn = -1; sgn <= 1; sgn += 2) {
+                    std::array<long,3> a = gc[i]; a[d] += sgn;
+                    const int v = vidx(a[0], a[1], a[2]);
+                    if (v >= 0) acc += Nv.row(v);
+                }
+            const double nn = acc.norm();
+            if (nn > 1e-12) Ns.row(i) = acc / nn;
+        }
+        Nv.swap(Ns);
+    }
+
     std::function<double(const Eigen::RowVector3d &)> f =
-        [&](const Eigen::RowVector3d & P){ return CS(lookup(P)); };
+        [&](const Eigen::RowVector3d & P){ return CS(nearest(P)); };
     std::function<Eigen::RowVector3d(const Eigen::RowVector3d &)> f_grad =
-        [&](const Eigen::RowVector3d & P){ return Eigen::RowVector3d(Nv.row(lookup(P))); };
+        [&](const Eigen::RowVector3d & P){ return Eigen::RowVector3d(Nv.row(nearest(P))); };
 
     // Same cells as marching cubes, re-expressed as the unique set of cell edges.
     Eigen::Matrix<int, Eigen::Dynamic, 2> GI2;
@@ -502,7 +522,7 @@ static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eige
     Eigen::MatrixXd Umc;
     Eigen::MatrixXi Gmc;
     if (contouring == ContouringMethod::DualContouring) {
-        dual_contour_continuation(V, F, tree, fwn_bvh, transform, eps, CS, CV, CI, CV_argmins, U, G);
+        dual_contour_continuation(eps, CS, CV, CI, U, G);
     } else {
         igl::copyleft::marching_cubes(CS,CV,CI,0.0,U,G); // our mesh
     }
