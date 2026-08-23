@@ -90,6 +90,35 @@ def test_native_matches_pyfunc(tmp_path):
 # --------------------------------------------------------------------------
 # Contouring choice: both back-ends produce a plausible mesh on the same cells.
 # --------------------------------------------------------------------------
+def _edge_incidence(G):
+    """Return (#boundary edges used by 1 face, #non-manifold edges used by >2)."""
+    from collections import Counter
+
+    ec = Counter()
+    for f in G:
+        for k in range(3):
+            a, b = int(f[k]), int(f[(k + 1) % 3])
+            ec[(min(a, b), max(a, b))] += 1
+    boundary = sum(1 for v in ec.values() if v == 1)
+    nonmanifold = sum(1 for v in ec.values() if v > 2)
+    return boundary, nonmanifold, len(ec)
+
+
+def test_dual_contouring_is_closed(tmp_path):
+    # Dual contouring runs on the SAME sparse continuation cells as marching
+    # cubes (expressed as edges); the result must be a closed surface.
+    V, F = unit_cube()
+    U, G, _, _ = sv.swept_volume(
+        V, F, NativeTransform(spin), eps=0.06, num_seeds=60,
+        dir_name=str(tmp_path / "dc"), contouring=ContouringMethod.DualContouring,
+    )
+    boundary, nonmanifold, E = _edge_incidence(G)
+    assert G.shape[0] > 0
+    assert boundary == 0, f"open surface: {boundary} boundary edges"
+    # a few non-manifold edges may occur at genuine sharp features; keep it tiny
+    assert nonmanifold <= 0.01 * E, (nonmanifold, E)
+
+
 def test_marching_cubes_and_dual_contouring(tmp_path):
     V, F = unit_cube()
     kw = dict(eps=0.08, num_seeds=40)

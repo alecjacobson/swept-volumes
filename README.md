@@ -105,8 +105,30 @@ shadows, and the input shape animated along the trajectory. It runs headless (no
 display needed) via polyscope's EGL backend:
 
 ```bash
-python python/example_polyscope.py --gif assets/swept_volume_demo.gif
+python python/example_polyscope.py --gif assets/swept_volume_demo.gif      # marching cubes
+python python/example_polyscope.py --contouring dc --gif demo_dc.gif       # dual contouring
 ```
+
+## Contouring: marching cubes or dual contouring
+
+Both back-ends run on **the same sparse cells** produced by the continuation —
+there is no dense grid and no re-sampling ("stamping") of the field:
+
+- **Marching cubes** consumes the cells `(CS, CV, CI)` directly.
+- **Dual contouring** consumes those same cells expressed as their unique set of
+  edges, using the continuation's own SDF values `CS` and, for normals, the
+  analytic gradient at each grid vertex. By the envelope theorem, at the argmin
+  pose `t*` (which the continuation already reports per vertex) the swept-SDF
+  gradient equals the brush-SDF gradient there — the direction to the closest
+  surface point — so no finite differences or differentiating through `t` are
+  needed. Both cost essentially the same.
+
+Dual contouring is the method used for the figures in the paper (it recovers
+sharp creases); pass `contouring=ContouringMethod.DualContouring` to use it.
+
+| marching cubes | dual contouring |
+|:---:|:---:|
+| ![marching cubes](assets/swept_volume_demo.gif) | ![dual contouring](assets/swept_volume_demo_dc.gif) |
 
 ## Installation
 
@@ -172,6 +194,6 @@ will recreate `experiment-name` *but with the armadillo as input*. We can even a
 
 
 ## Known Issues
-This released code uses marching cubes as a surface generation algorithm, while our paper examples use dual contouring. I plan on adding dual contouring functionality to this repository soon when I manage to clean our original research code :-). All other elements in the algorithm are reproduced here exactly as were used to produce the examples in our paper.
+This released code originally used marching cubes for surface generation, while the paper examples use dual contouring. Dual contouring is now available too (see [Contouring](#contouring-marching-cubes-or-dual-contouring) above): it runs on the same sparse continuation cells, using the continuation's SDF values and analytic (envelope-theorem) normals. All other elements in the algorithm are reproduced here exactly as were used to produce the examples in our paper.
 
 Please do not hesitate to contact [sgsellan@cs.toronto.edu](mailto:sgsellan@cs.toronto.edu) if you find any issues or bugs in this code, or you struggle to run it in any way.

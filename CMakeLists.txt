@@ -43,6 +43,11 @@ if(SWEPT_VOLUMES_BENCH)
     set_target_properties(swept-volumes-bench PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/)
     target_link_libraries(swept-volumes-bench PRIVATE core igl::core igl_copyleft::core)
+
+    add_executable(sparse-dc-experiment ${CMAKE_CURRENT_SOURCE_DIR}/experiments/sparse_dc_static.cpp)
+    set_target_properties(sparse-dc-experiment PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/)
+    target_link_libraries(sparse-dc-experiment PRIVATE igl::core igl_copyleft::core)
 endif()
 
 if(SWEPT_VOLUMES_GUI)
