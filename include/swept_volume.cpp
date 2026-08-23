@@ -192,8 +192,15 @@ static void dual_contour_sparse(
     Eigen::MatrixXd & U, Eigen::MatrixXi & G)
 {
     const int nsteps = std::max(2, stamps);
-    auto swept_sdf = [&](const Eigen::RowVector3d & P) -> double {
+    // Evaluate the swept SDF f(P) = min_t g(P,t) at P, and (optionally) its
+    // spatial gradient.  By the envelope theorem, at the argmin pose t*,
+    // d f / d P = d g / d P, and for a signed distance to a mesh that gradient
+    // is s * (P - c_world)/||P - c_world||, where c_world is the closest surface
+    // point at t* (which tree.squared_distance already gives us).  So the normal
+    // is exact -- no finite differences, no differentiating through t.
+    auto eval = [&](const Eigen::RowVector3d & P, Eigen::RowVector3d * grad) -> double {
         double best = std::numeric_limits<double>::infinity();
+        Eigen::RowVector3d best_grad = Eigen::RowVector3d::Zero();
         Eigen::Matrix4d A, Adot;
         for (int k = 0; k <= nsteps; ++k) {
             const double t = double(k)/double(nsteps);
@@ -206,29 +213,48 @@ static void dual_contour_sparse(
             const double s = 1.0 - 2.0*w(0);
             int i; Eigen::RowVector3d c;
             const double sqrd = tree.squared_distance(V, F, pos, i, c);
-            best = std::min(best, s*std::sqrt(sqrd) - iso);
+            const double val = s*std::sqrt(sqrd) - iso;
+            if (val < best) {
+                best = val;
+                if (grad) {
+                    // closest point back in world space, and the analytic normal
+                    const Eigen::RowVector3d cworld = (Rt * c.transpose()).transpose() + xt;
+                    Eigen::RowVector3d dir = P - cworld;
+                    const double n = dir.norm();
+                    best_grad = (n > 1e-12) ? (s * dir / n) : Eigen::RowVector3d(0, 0, 1);
+                }
+            }
         }
+        if (grad) *grad = best_grad;
         return best;
     };
     std::function<double(const Eigen::RowVector3d &)> f =
-        [&](const Eigen::RowVector3d & P){ return swept_sdf(P); };
+        [&](const Eigen::RowVector3d & P){ return eval(P, nullptr); };
     std::function<Eigen::RowVector3d(const Eigen::RowVector3d &)> f_grad =
         [&](const Eigen::RowVector3d & P){
-            const double h = 0.5*eps;
             Eigen::RowVector3d g;
-            for (int d = 0; d < 3; ++d) {
-                Eigen::RowVector3d dp = Eigen::RowVector3d::Zero();
-                dp(d) = h;
-                g(d) = (swept_sdf(P+dp) - swept_sdf(P-dp))/(2.0*h);
-            }
+            eval(P, &g);
             const double n = g.norm();
-            if (n > 0.0) g /= n;
-            return g;
+            return (n > 0.0) ? Eigen::RowVector3d(g / n) : g;
         };
-    const Eigen::RowVector3d step(eps, eps, eps);
-    igl::dual_contouring(f, f_grad, step, CS, CV, CI,
-                         /*constrained=*/false, /*triangles=*/true, /*root_finding=*/false,
-                         U, G);
+    // The continuation cells (CS,CV,CI) form a thin ~1-cell surface shell, which
+    // is all marching cubes needs (it triangulates each cell independently).
+    // Dual contouring instead emits one face per sign-change edge, stitching the
+    // FOUR cells around that edge, so it needs complete cell neighbourhoods. We
+    // therefore run the dense dual_contouring over the bounding box of the
+    // continuation cells (a complete regular grid -- no seed/neighbourhood
+    // issues); f is only evaluated near the surface where it matters.
+    (void) CI; (void) CS;
+    const Eigen::RowVector3d bmin =
+        CV.colwise().minCoeff().array() - 2.0 * eps;
+    const Eigen::RowVector3d bmax =
+        CV.colwise().maxCoeff().array() + 2.0 * eps;
+    const int nx = std::max(2, (int)std::ceil((bmax(0) - bmin(0)) / eps));
+    const int ny = std::max(2, (int)std::ceil((bmax(1) - bmin(1)) / eps));
+    const int nz = std::max(2, (int)std::ceil((bmax(2) - bmin(2)) / eps));
+    igl::dual_contouring(f, f_grad, bmin, bmax, nx, ny, nz,
+                         /*constrained=*/false, /*triangles=*/true,
+                         /*root_finding=*/true, U, G);
 }
 
 static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const SweptTransform & transform, const double eps, const int num_seeds, const std::string dir_name, const ContouringMethod contouring, const std::vector<Eigen::Matrix4d>* TransformationsPtr, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){

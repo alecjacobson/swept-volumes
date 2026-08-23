@@ -114,7 +114,13 @@ def main():
     ap.add_argument("--num-seeds", type=int, default=400)
     ap.add_argument("--frames", type=int, default=48)
     ap.add_argument("--width", type=int, default=720)
+    ap.add_argument("--contouring", choices=["mc", "dc"], default="mc",
+                    help="marching cubes (default) or dual contouring")
     args = ap.parse_args()
+
+    from swept_volumes import ContouringMethod
+    contouring = (ContouringMethod.DualContouring if args.contouring == "dc"
+                  else ContouringMethod.MarchingCubes)
 
     V, F = make_cross()
     nt = NativeTransform(orbit)
@@ -123,7 +129,8 @@ def main():
     import time
     t0 = time.time()
     U, G, _, _ = sv.swept_volume(
-        V, F, nt, eps=args.eps, num_seeds=args.num_seeds, dir_name="/tmp/swept_demo"
+        V, F, nt, eps=args.eps, num_seeds=args.num_seeds,
+        dir_name="/tmp/swept_demo", contouring=contouring,
     )
     print(f"swept volume computed in {time.time() - t0:.1f}s")
     print(f"swept volume: {U.shape[0]} verts, {G.shape[0]} faces")
