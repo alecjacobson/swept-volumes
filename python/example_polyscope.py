@@ -18,38 +18,71 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 
+from numba import njit
+
 import swept_volumes as sv
 from swept_volumes import NativeTransform, native_transform
 
 TWO_PI = 2.0 * math.pi
 ORBIT_R = 0.55   # orbit radius
 BOB_Z = 0.18     # vertical bob amplitude
+TWIST = 2.0      # full twists of the shape per orbit (integer -> cyclic)
 
 
-# --- the cyclic trajectory: orbit on a circle + spin + vertical bob ----------
+@njit(cache=True)
+def _mm3(a, b):
+    c = np.zeros((3, 3))
+    for i in range(3):
+        for j in range(3):
+            s = 0.0
+            for k in range(3):
+                s += a[i, k] * b[k, j]
+            c[i, j] = s
+    return c
+
+
+# --- the cyclic trajectory: orbit on a circle, spin, twist, and bob ----------
 @native_transform
 def orbit(t, A, Adot):
-    th = TWO_PI * t
-    c, s = math.cos(th), math.sin(th)
+    th = TWO_PI * t                 # orbital angle
+    ph = TWIST * TWO_PI * t         # twist angle about the shape's radial axis
+    wth = TWO_PI                    # d(th)/dt
+    wph = TWIST * TWO_PI            # d(ph)/dt
+    cz, sz = math.cos(th), math.sin(th)
+    cx, sx = math.cos(ph), math.sin(ph)
+
+    # Rz(th): orientation follows the orbit
+    Rz = np.zeros((3, 3))
+    Rz[0, 0] = cz; Rz[0, 1] = -sz; Rz[1, 0] = sz; Rz[1, 1] = cz; Rz[2, 2] = 1.0
+    dRz = np.zeros((3, 3))          # d Rz / d th
+    dRz[0, 0] = -sz; dRz[0, 1] = -cz; dRz[1, 0] = cz; dRz[1, 1] = -sz
+
+    # Rx(ph): twist about the local x (radial) axis
+    Rx = np.zeros((3, 3))
+    Rx[0, 0] = 1.0; Rx[1, 1] = cx; Rx[1, 2] = -sx; Rx[2, 1] = sx; Rx[2, 2] = cx
+    dRx = np.zeros((3, 3))          # d Rx / d ph
+    dRx[1, 1] = -sx; dRx[1, 2] = -cx; dRx[2, 1] = cx; dRx[2, 2] = -sx
+
+    R = _mm3(Rz, Rx)
+    dR = _mm3(dRz, Rx)
+    dR2 = _mm3(Rz, dRx)
+
     c2, s2 = math.cos(2 * th), math.sin(2 * th)
-    w = TWO_PI  # d(th)/dt
-    # pose: rotation Rz(th), translation on a circle + a vertical bob
-    A[0, 0] = c;  A[0, 1] = -s
-    A[1, 0] = s;  A[1, 1] = c
-    A[2, 2] = 1.0
-    A[3, 3] = 1.0
-    A[0, 3] = ORBIT_R * c
-    A[1, 3] = ORBIT_R * s
+    for i in range(3):
+        for j in range(3):
+            A[i, j] = R[i, j]
+            Adot[i, j] = wth * dR[i, j] + wph * dR2[i, j]
+    # translation: circular orbit + vertical bob
+    A[0, 3] = ORBIT_R * cz
+    A[1, 3] = ORBIT_R * sz
     A[2, 3] = BOB_Z * s2
-    # time-derivative
-    Adot[0, 0] = -s * w; Adot[0, 1] = -c * w
-    Adot[1, 0] = c * w;  Adot[1, 1] = -s * w
-    Adot[0, 3] = -ORBIT_R * s * w
-    Adot[1, 3] = ORBIT_R * c * w
-    Adot[2, 3] = BOB_Z * c2 * 2.0 * w
+    A[3, 3] = 1.0
+    Adot[0, 3] = -ORBIT_R * sz * wth
+    Adot[1, 3] = ORBIT_R * cz * wth
+    Adot[2, 3] = BOB_Z * c2 * 2.0 * wth
 
 
-def make_bar(hx=0.28, hy=0.08, hz=0.08):
+def _box(hx, hy, hz):
     V = np.array(
         [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
          [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]], float
@@ -62,21 +95,37 @@ def make_bar(hx=0.28, hy=0.08, hz=0.08):
     return V, F
 
 
+def make_cross():
+    """A 3D cross: three orthogonal bars (the algorithm needs no manifoldness)."""
+    L, W = 0.30, 0.085
+    parts = [_box(L, W, W), _box(W, L, W), _box(W, W, L)]
+    Vs, Fs, off = [], [], 0
+    for V, F in parts:
+        Vs.append(V)
+        Fs.append(F + off)
+        off += V.shape[0]
+    return np.vstack(Vs), np.vstack(Fs).astype(np.int32)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gif", default="assets/swept_volume_demo.gif")
-    ap.add_argument("--eps", type=float, default=0.04)
+    ap.add_argument("--eps", type=float, default=0.015)
+    ap.add_argument("--num-seeds", type=int, default=400)
     ap.add_argument("--frames", type=int, default=48)
     ap.add_argument("--width", type=int, default=720)
     args = ap.parse_args()
 
-    V, F = make_bar()
+    V, F = make_cross()
     nt = NativeTransform(orbit)
 
     # --- compute the swept volume ---
+    import time
+    t0 = time.time()
     U, G, _, _ = sv.swept_volume(
-        V, F, nt, eps=args.eps, num_seeds=200, dir_name="/tmp/swept_demo"
+        V, F, nt, eps=args.eps, num_seeds=args.num_seeds, dir_name="/tmp/swept_demo"
     )
+    print(f"swept volume computed in {time.time() - t0:.1f}s")
     print(f"swept volume: {U.shape[0]} verts, {G.shape[0]} faces")
 
     # --- render with polyscope ---
