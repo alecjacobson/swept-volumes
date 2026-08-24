@@ -309,8 +309,9 @@ static void dual_contour_continuation(
     }
 
     const Eigen::RowVector3d step(eps, eps, eps);
+    const bool constrained = std::getenv("SV_DC_CONSTRAINED") != nullptr;
     igl::dual_contouring(f, f_grad, step, CS, CV, GI2,
-                         /*constrained=*/false, /*triangles=*/true,
+                         constrained, /*triangles=*/true,
                          /*root_finding=*/true, U, G);
 }
 
@@ -637,6 +638,7 @@ static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eige
         return dist;
     };
 
+    const double t_contour0 = igl::get_seconds();
     if (contouring == ContouringMethod::DualContouring) {
         dual_contour_continuation(eps, CS, CV, CI, CV_argmins, sdf_at, U, G);
     } else {
@@ -644,6 +646,9 @@ static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eige
         if (std::getenv("SV_MC_ROOTFIND"))
             refine_mc_crossings(U, CV, CV_argmins, eps, sdf_at);
     }
+    std::cout << "Contouring ("
+              << (contouring == ContouringMethod::DualContouring ? "DC" : "MC")
+              << ") took " << igl::get_seconds() - t_contour0 << " second(s)." << std::endl;
 
 
     igl::writeOBJ(dir_name + "/input.obj",V,F);
@@ -653,7 +658,8 @@ static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eige
     igl::writeOBJ(dir_name + "/ours.obj",U,G);
     
     
-    // Strobo
+    // Strobo (stamping baseline for comparison; not part of our output)
+    const double t_strobo0 = igl::get_seconds();
     const auto & transform_affine = [&](const double t)->Eigen::Affine3d
     {
         Eigen::Affine3d T = Eigen::Affine3d::Identity();
@@ -704,6 +710,8 @@ static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eige
         strobo_F_list.push_back(G_10);
         igl::writeOBJ(dir_name + "/strobo_" + std::to_string(div) + "mc.obj",U_10,G_10);
 }
+    std::cout << "Strobo baseline (div 10+100) took "
+              << igl::get_seconds() - t_strobo0 << " second(s)." << std::endl;
 
 }
 
