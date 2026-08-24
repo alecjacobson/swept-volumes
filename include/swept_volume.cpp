@@ -350,7 +350,7 @@ static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eige
             // fast winding number
             Eigen::VectorXd w;
             igl::fast_winding_number(fwn_bvh,2.0,pos,w);
-            s = 1.-2.*w(0);
+            s = (w(0) > 0.5) ? -1.0 : 1.0;   // clamp sign: winding can exceed 1 for overlapping/soup brushes
             //running_sign = s;
             //double ub = (pos-running_closest_point) * (pos-running_closest_point).transpose();
             sqrd = tree.squared_distance(V,F,pos,i,c);
@@ -379,7 +379,7 @@ static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eige
             // fast winding number
             Eigen::VectorXd w;
             igl::fast_winding_number(fwn_bvh,2.0,pos,w);
-            s = 1.-2.*w(0);
+            s = (w(0) > 0.5) ? -1.0 : 1.0;   // clamp sign: winding can exceed 1 for overlapping/soup brushes
             running_sign = s;
             //double ub = (pos-running_closest_point) * (pos-running_closest_point).transpose();
             sqrd = tree.squared_distance(V,F,pos,i,c);

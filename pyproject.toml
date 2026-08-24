@@ -13,7 +13,8 @@ dependencies = ["numpy"]
 
 [project.optional-dependencies]
 numba = ["numba"]
-test = ["pytest", "numba"]
+# libigl + trimesh power the analytic correctness tests (signed distance, brushes)
+test = ["pytest", "numba", "libigl", "trimesh", "scipy"]
 
 [project.urls]
 Homepage = "https://github.com/alecjacobson/swept-volumes"
