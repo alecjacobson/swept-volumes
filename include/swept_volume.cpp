@@ -183,23 +183,29 @@ SweptTransform make_keyframe_transform(const std::vector<Eigen::Matrix4d> & Tran
     };
 }
 
-// Dual-contour the swept volume from exactly the continuation output that
-// marching cubes uses -- the sparse cells (CS values, CV verts, CI cells).  No
-// re-evaluation of the field (no stamping, no dense grid): DC is a pure function
-// of (CS, CV, CI).
+// Continuous swept SDF at an arbitrary point, warm-started from a locally
+// provided tangent time.  Returns the signed value and (via out-params) the
+// argmin time and closest world point.  Evaluated with the continuation's own
+// per-point optimizer so it matches CS.
+using SweptSDF = std::function<double(const Eigen::RowVector3d & P, double tseed,
+                                      double & tstar, Eigen::RowVector3d & cworld)>;
+
+// Dual-contour the swept volume from the continuation's sparse cells (CS values,
+// CV verts, CI cells).  libigl's sparse dual_contouring consumes the cells as
+// their UNIQUE EDGES (#edges x 2), not the #cells x 8 matrix; it places one
+// vertex per cell and one face per sign-change edge.
 //
-// libigl's sparse dual_contouring consumes the cells expressed as UNIQUE EDGES
-// (#edges x 2), not the #cells x 8 matrix; it places one vertex per cell and one
-// face per sign-change edge.  We give it:
-//   * values : CS directly (crossings by interpolation, same as marching cubes).
-//   * normals: the normalized central finite-difference gradient of CS on the
-//     grid, lightly smoothed over grid neighbours.  (CS is accurate to ~the
-//     continuation tolerance; the per-vertex argmin times are much coarser, so a
-//     P-C-from-argmin normal is noticeably worse -- measured ~16 deg vs ~10 deg.)
+// With root finding, dual_contouring bisects each sign-changing edge using the
+// continuous SDF `sdf` (warm-started from the nearest grid vertex's argmin time
+// CV_argmins) to place the crossing exactly, and the QEF normal there is the
+// analytic P - C (C = closest brush point at the tangent time; direction is the
+// brush normal, magnitude ~iso, so it is well defined).  This recovers sharp
+// features that a grid-gradient normal rounds off.
 static void dual_contour_continuation(
     const double eps,
     const Eigen::VectorXd & CS, const Eigen::MatrixXd & CV,
-    const Eigen::MatrixXi & CI,
+    const Eigen::MatrixXi & CI, const Eigen::VectorXd & CV_argmins,
+    const SweptSDF & sdf,
     Eigen::MatrixXd & U, Eigen::MatrixXi & G)
 {
     const int n = (int)CV.rows();
@@ -233,9 +239,9 @@ static void dual_contour_continuation(
         return best;
     };
 
-    // Per-vertex normals = normalized central finite-difference gradient of the
-    // continuation's own (accurate) values CS on the grid; one-sided at band
-    // edges.  This needs no argmin time and no re-evaluation of the field.
+    // Per-vertex fallback normals = normalized central finite-difference gradient
+    // of CS on the grid (one-sided at band edges).  Used to orient the analytic
+    // P - C normal consistently, and as a fallback if P - C is degenerate.
     Eigen::MatrixXd Nv(n, 3);
     for (int i = 0; i < n; ++i) {
         Eigen::RowVector3d g(0, 0, 0);
@@ -270,10 +276,25 @@ static void dual_contour_continuation(
         Nv.swap(Ns);
     }
 
+    // Continuous SDF for root finding, warm-started from the nearest grid
+    // vertex's tangent time; and the analytic normal P - C at the crossing.
     std::function<double(const Eigen::RowVector3d &)> f =
-        [&](const Eigen::RowVector3d & P){ return CS(nearest(P)); };
+        [&](const Eigen::RowVector3d & P){
+            double ts; Eigen::RowVector3d cw;
+            return sdf(P, CV_argmins(nearest(P)), ts, cw);
+        };
     std::function<Eigen::RowVector3d(const Eigen::RowVector3d &)> f_grad =
-        [&](const Eigen::RowVector3d & P){ return Eigen::RowVector3d(Nv.row(nearest(P))); };
+        [&](const Eigen::RowVector3d & P) -> Eigen::RowVector3d {
+            const int i = nearest(P);
+            double ts; Eigen::RowVector3d cw;
+            sdf(P, CV_argmins(i), ts, cw);
+            Eigen::RowVector3d dir = P - cw;
+            const double dn = dir.norm();
+            if (dn < 1e-12) return Eigen::RowVector3d(Nv.row(i));   // fallback: grid gradient
+            dir /= dn;
+            if (dir.dot(Nv.row(i)) < 0.0) dir = -dir;               // consistent orientation
+            return dir;
+        };
 
     // Same cells as marching cubes, re-expressed as the unique set of cell edges.
     Eigen::Matrix<int, Eigen::Dynamic, 2> GI2;
@@ -290,7 +311,58 @@ static void dual_contour_continuation(
     const Eigen::RowVector3d step(eps, eps, eps);
     igl::dual_contouring(f, f_grad, step, CS, CV, GI2,
                          /*constrained=*/false, /*triangles=*/true,
-                         /*root_finding=*/false, U, G);
+                         /*root_finding=*/true, U, G);
+}
+
+// Root-find the crossing of each marching-cubes vertex: MC places vertices by
+// linear interpolation of CS along a grid edge; here we instead bisect the true
+// continuous SDF along that edge (warm-started from the edge endpoints' argmin
+// times), so crossings sit on the actual surface rather than the linearised one.
+static void refine_mc_crossings(
+    Eigen::MatrixXd & U, const Eigen::MatrixXd & CV,
+    const Eigen::VectorXd & CV_argmins, const double eps, const SweptSDF & sdf)
+{
+    const int n = (int)CV.rows();
+    const Eigen::RowVector3d origin = CV.colwise().minCoeff();
+    const auto keyijk = [](int64_t i, int64_t j, int64_t k) -> int64_t {
+        return ((i + (1 << 20)) * 2097169 + (j + (1 << 20))) * 2097169 + (k + (1 << 20));
+    };
+    std::unordered_map<int64_t, int> vmap; vmap.reserve(n * 2);
+    for (int i = 0; i < n; ++i) {
+        const Eigen::RowVector3d g = (CV.row(i) - origin) / eps;
+        vmap[keyijk(std::lround(g(0)), std::lround(g(1)), std::lround(g(2)))] = i;
+    }
+    const auto vidx = [&](int64_t i, int64_t j, int64_t k) -> int {
+        auto it = vmap.find(keyijk(i, j, k)); return it == vmap.end() ? -1 : it->second;
+    };
+    igl::parallel_for(U.rows(), [&](const int r) {
+        const Eigen::RowVector3d P = U.row(r);
+        const Eigen::RowVector3d g = (P - origin) / eps;
+        int a = 0; double bestf = -1.0;
+        for (int d = 0; d < 3; ++d) {
+            const double fr = std::min(g(d) - std::floor(g(d)), std::ceil(g(d)) - g(d));
+            if (fr > bestf) { bestf = fr; a = d; }
+        }
+        if (bestf < 1e-6) return;   // essentially on a grid vertex
+        int64_t c0[3] = {(int64_t)std::lround(g(0)), (int64_t)std::lround(g(1)), (int64_t)std::lround(g(2))};
+        c0[a] = (int64_t)std::floor(g(a));
+        int64_t c1[3] = {c0[0], c0[1], c0[2]}; c1[a] += 1;
+        const int v0 = vidx(c0[0], c0[1], c0[2]), v1 = vidx(c1[0], c1[1], c1[2]);
+        if (v0 < 0 || v1 < 0) return;
+        const Eigen::RowVector3d A = CV.row(v0), B = CV.row(v1);
+        const double seed = 0.5 * (CV_argmins(v0) + CV_argmins(v1));
+        double ts; Eigen::RowVector3d cw;
+        double lo = 0.0, hi = 1.0;
+        double flo = sdf(A, seed, ts, cw);
+        double fhi = sdf(B, seed, ts, cw);
+        if (flo * fhi > 0.0) return;   // no bracketed sign change
+        for (int it = 0; it < 25; ++it) {
+            const double mid = 0.5 * (lo + hi);
+            const double fm = sdf((A + (B - A) * mid).eval(), seed, ts, cw);
+            if (flo * fm <= 0.0) { hi = mid; fhi = fm; } else { lo = mid; flo = fm; }
+        }
+        U.row(r) = A + (B - A) * (0.5 * (lo + hi));
+    }, 1000);
 }
 
 static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const SweptTransform & transform, const double eps, const int num_seeds, const std::string dir_name, const ContouringMethod contouring, const std::vector<Eigen::Matrix4d>* TransformationsPtr, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
@@ -521,10 +593,56 @@ static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eige
     std::system((make_dir + dir_name).c_str());
     Eigen::MatrixXd Umc;
     Eigen::MatrixXi Gmc;
+
+    // Continuous swept SDF at an arbitrary point, evaluated with the SAME
+    // per-point optimizer the continuation uses (so it matches CS), warm-started
+    // from a locally provided tangent time.  Also returns the argmin time and the
+    // closest world point (for the analytic surface normal).  Used by dual
+    // contouring's root finding / normals and the marching-cubes crossing refine.
+    SweptSDF sdf_at = [&](const Eigen::RowVector3d & P, double tseed,
+                          double & tstar, Eigen::RowVector3d & cworld) -> double {
+        std::function<double(const double)> fP = [&](const double t)->double{
+            Eigen::RowVector3d xt,vt; Eigen::Matrix3d Rt,VRt;
+            interpolate_position(t,xt,vt,Rt,VRt);
+            const Eigen::RowVector3d pos = ((Rt.inverse())*((P - xt).transpose())).transpose();
+            Eigen::VectorXd w; igl::fast_winding_number(fwn_bvh,2.0,pos,w);
+            const double s = (w(0) > 0.5) ? -1.0 : 1.0;
+            int i; Eigen::RowVector3d c;
+            return s*std::sqrt(tree.squared_distance(V,F,pos,i,c)) - iso;
+        };
+        std::function<double(const double)> gfP = [&](const double t)->double{
+            Eigen::RowVector3d xt,vt; Eigen::Matrix3d Rt,VRt;
+            interpolate_position(t,xt,vt,Rt,VRt);
+            const Eigen::RowVector3d pos = ((Rt.inverse())*((P - xt).transpose())).transpose();
+            Eigen::VectorXd w; igl::fast_winding_number(fwn_bvh,2.0,pos,w);
+            const double s = (w(0) > 0.5) ? -1.0 : 1.0;
+            int i; Eigen::RowVector3d c;
+            tree.squared_distance(V,F,pos,i,c);
+            Eigen::RowVector3d cp = c - pos; cp.normalize();
+            const Eigen::RowVector3d pv =
+                (-Rt.inverse()*VRt*Rt.inverse()*(P.transpose()-xt.transpose())
+                 - Rt.inverse()*vt.transpose()).transpose();
+            return (-s)*cp.dot(pv);
+        };
+        double dist = 0.0, xstar = tseed;
+        std::vector<double> iv, vv, mm;
+        gradient_descent_test(fP, gfP, tseed, dist, xstar, iv, vv, mm);
+        tstar = xstar;
+        Eigen::RowVector3d xt,vt; Eigen::Matrix3d Rt,VRt;
+        interpolate_position(tstar,xt,vt,Rt,VRt);
+        const Eigen::RowVector3d pos = ((Rt.inverse())*((P - xt).transpose())).transpose();
+        int i; Eigen::RowVector3d c;
+        tree.squared_distance(V,F,pos,i,c);
+        cworld = (Rt*c.transpose()).transpose() + xt;
+        return dist;
+    };
+
     if (contouring == ContouringMethod::DualContouring) {
-        dual_contour_continuation(eps, CS, CV, CI, U, G);
+        dual_contour_continuation(eps, CS, CV, CI, CV_argmins, sdf_at, U, G);
     } else {
         igl::copyleft::marching_cubes(CS,CV,CI,0.0,U,G); // our mesh
+        if (std::getenv("SV_MC_ROOTFIND"))
+            refine_mc_crossings(U, CV, CV_argmins, eps, sdf_at);
     }
 
 

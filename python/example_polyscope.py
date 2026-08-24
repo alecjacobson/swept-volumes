@@ -29,7 +29,7 @@ BOB_Z = 0.18     # vertical bob amplitude
 TWIST = 2.0      # full twists of the shape per orbit (integer -> cyclic)
 
 
-@njit(cache=True)
+@njit(cache=False)  # cache=False so the demo can be imported dynamically (tests)
 def _mm3(a, b):
     c = np.zeros((3, 3))
     for i in range(3):
