@@ -123,7 +123,8 @@ def make_cross():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gif", default="assets/swept_volume_demo.gif")
-    ap.add_argument("--eps", type=float, default=0.015)
+    ap.add_argument("--eps", type=float, default=0.0075,
+                    help="grid cell size (showcase resolution; use e.g. 0.02 for a quick run)")
     ap.add_argument("--num-seeds", type=int, default=400)
     ap.add_argument("--frames", type=int, default=48)
     ap.add_argument("--width", type=int, default=720)
