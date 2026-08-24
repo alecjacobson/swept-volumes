@@ -6,28 +6,36 @@
 # Precompiled Headers
 *.gch
 *.pch
-
 # Compiled Dynamic libraries
 *.so
 *.dylib
 *.dll
-
 # Fortran module files
 *.mod
-
 # Compiled Static libraries
 *.lai
 *.la
 *.a
 *.lib
-
 # Executables
 *.exe
 *.out
 *.app
-
 *.un~
 *.swo
 *.swp
-
 build/*
+build/
+_skbuild/
+*.egg-info/
+__pycache__/
+*.pyc
+data/experiments/
+.pytest_cache/
+/swept-volumes-bench
+/swept-volumes-gui
+swept_output/
+native_output/
+imgui.ini
+/sparse-dc-experiment
+/swept-analytic-experiment
