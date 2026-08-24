@@ -310,9 +310,10 @@ static void dual_contour_continuation(
 
     const Eigen::RowVector3d step(eps, eps, eps);
     const bool constrained = std::getenv("SV_DC_CONSTRAINED") != nullptr;
+    const bool root_finding = std::getenv("SV_DC_NO_ROOTFIND") == nullptr;
     igl::dual_contouring(f, f_grad, step, CS, CV, GI2,
                          constrained, /*triangles=*/true,
-                         /*root_finding=*/true, U, G);
+                         root_finding, U, G);
 }
 
 // Root-find the crossing of each marching-cubes vertex: MC places vertices by
