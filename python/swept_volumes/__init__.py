@@ -89,12 +89,22 @@ def native_transform(fn=None, *, cache=True):
     The returned value is the numba ``CFunc`` (it exposes ``.address``); pass it
     to :class:`NativeTransform`.
     """
+    import sys
+
     from numba import cfunc, farray, njit
 
     def _decorate(f):
+        # numba's on-disk cache keys on the defining module; caching a function
+        # from __main__ or a dynamically-loaded module (e.g. importlib in tests)
+        # writes a cache that cannot be reloaded ("No module named '<dynamic>'").
+        # Only cache when the function lives in a real, importable module.
+        mod = getattr(f, "__module__", None)
+        use_cache = bool(cache) and mod not in (None, "__main__", "<dynamic>") \
+            and mod in sys.modules and getattr(sys.modules[mod], "__file__", None)
+
         # Compile the user's (t, A, Adot) body so the cfunc trampoline can call
         # it in nopython mode, then expose it via the pointer ABI.
-        inner = f if hasattr(f, "inspect_llvm") else njit(cache=cache)(f)
+        inner = f if hasattr(f, "inspect_llvm") else njit(cache=use_cache)(f)
 
         def _wrapped(t, a_ptr, adot_ptr):
             A = farray(a_ptr, (4, 4))
@@ -108,7 +118,7 @@ def native_transform(fn=None, *, cache=True):
             inner(t, A, Adot)
 
         _wrapped.__name__ = getattr(f, "__name__", "native_transform")
-        return cfunc(_transform_sig(), nopython=True, cache=cache)(_wrapped)
+        return cfunc(_transform_sig(), nopython=True, cache=use_cache)(_wrapped)
 
     if fn is not None:
         return _decorate(fn)
