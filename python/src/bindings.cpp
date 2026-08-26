@@ -133,7 +133,8 @@ NB_MODULE(_swept_volumes, m) {
         "swept_volume",
         [](const Eigen::MatrixXd &V, const Eigen::MatrixXi &F,
            const NativeTransform &transform, double eps, int num_seeds,
-           const std::string &dir_name, ContouringMethod contouring) {
+           const std::string &dir_name, ContouringMethod contouring,
+           bool diagnostics) {
             Eigen::MatrixXd U;
             Eigen::MatrixXi G;
             std::vector<Eigen::MatrixXd> sV;
@@ -142,22 +143,25 @@ NB_MODULE(_swept_volumes, m) {
             {
                 nb::gil_scoped_release release;
                 swept_volume(V, F, tf, eps, num_seeds, dir_name, contouring, U,
-                             G, sV, sF);
+                             G, sV, sF, diagnostics);
             }
             return std::make_tuple(U, G, sV, sF);
         },
         "V"_a, "F"_a, "transform"_a, "eps"_a = 0.02, "num_seeds"_a = 100,
         "dir_name"_a = "swept_output",
         "contouring"_a = ContouringMethod::MarchingCubes,
+        "diagnostics"_a = false,
         "Compute the swept volume of mesh (V,F) under a native transform(t).\n"
-        "Returns (U, G, strobo_V_list, strobo_F_list).");
+        "Returns (U, G, strobo_V_list, strobo_F_list). With diagnostics=True the\n"
+        "strobo/stamping baseline is computed (into the strobo lists) and debug\n"
+        "meshes are written under dir_name; off by default (they don't affect U,G).");
 
     // Keyframe-driven swept volume (backwards compatible trajectory).
     m.def(
         "swept_volume_keyframes",
         [](const Eigen::MatrixXd &V, const Eigen::MatrixXi &F,
            const std::vector<Eigen::Matrix4d> &keyframes, double eps,
-           int num_seeds, const std::string &dir_name) {
+           int num_seeds, const std::string &dir_name, bool diagnostics) {
             Eigen::MatrixXd U;
             Eigen::MatrixXi G;
             std::vector<Eigen::MatrixXd> sV;
@@ -165,13 +169,14 @@ NB_MODULE(_swept_volumes, m) {
             {
                 nb::gil_scoped_release release;
                 swept_volume(V, F, keyframes, eps, num_seeds, dir_name, U, G, sV,
-                             sF);
+                             sF, diagnostics);
             }
             return std::make_tuple(U, G, sV, sF);
         },
         "V"_a, "F"_a, "keyframes"_a, "eps"_a = 0.02, "num_seeds"_a = 100,
-        "dir_name"_a = "swept_output",
-        "Compute the swept volume from a list of 4x4 keyframe poses.");
+        "dir_name"_a = "swept_output", "diagnostics"_a = false,
+        "Compute the swept volume from a list of 4x4 keyframe poses "
+        "(Catmull-Rom translation + slerp rotation between keyframes).");
 
     // Slow reference path: a plain Python callable returning (A, Adot).  Every
     // evaluation re-enters Python -- provided only for correctness comparison.

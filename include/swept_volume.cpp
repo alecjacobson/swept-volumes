@@ -367,7 +367,8 @@ static void refine_mc_crossings(
     }, 1000);
 }
 
-static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const SweptTransform & transform, const double eps, const int num_seeds, const std::string dir_name, const ContouringMethod contouring, const std::vector<Eigen::Matrix4d>* TransformationsPtr, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
+static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const SweptTransform & transform, const double eps, const int num_seeds, const std::string dir_name, const ContouringMethod contouring, const std::vector<Eigen::Matrix4d>* TransformationsPtr, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list, const bool compute_extras){
+    (void) UV; (void) UVF;
     double iso = 0.001;
     auto sgn = [](double val) -> double {
         return (double) ((double(0) < val) - (val < double(0)));
@@ -556,43 +557,21 @@ static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eige
     Eigen::MatrixXd CV, CV_10;
     Eigen::VectorXd CS, CS_10;
     Eigen::VectorXd CV_argmins, CV_argmins_10;
-    std::cout << "Starting continuation with " << init_voxels.size() << " seeds." << std::endl;
+    if (compute_extras) std::cout << "Starting continuation with " << init_voxels.size() << " seeds." << std::endl;
     tictoc();
     sparse_continuation(p0,init_voxels,init_times,scalarFunc,eps,1000000,CS,CV,CI,CV_argmins);
-    std::cout << "Continuation took "<< tictoc() <<" second(s)."<< std::endl;
-     std::cout << "Number of (unique) vertices: " << CV.rows() << std::endl;
-     std::cout << "Gradient descent queries: " << grad_descent_queries << std::endl;
-     std::cout << "Gradient descent queries per vertex: " << ((double) grad_descent_queries)/( (double) CV.rows()) << std::endl;
-     std::cout << "Distance queries: " << distance_queries << std::endl;
-     std::cout << "Distance queries per vertex: " << ((double) distance_queries)/( (double) CV.rows()) << std::endl;
-    Eigen::MatrixXd input_data,output_data;
-    input_data.resize(CV_argmins.size(),5);
-    //input_data.col(0) = CV_argmins;
-    // Get normals and UVs
-    Eigen::MatrixXd normals;
-    igl::per_face_normals(V,F,normals);
-    for (int i = 0; i < CV.rows(); i++) {
-        int k;
-        double s,sqrd,sqrd2,s2;
-        Eigen::Matrix3d VRt,Rt;
-        Eigen::RowVector3d xt,vt,pos,c,c2,P;
-        P = CV.row(i).transpose();
-        interpolate_position(CV_argmins(i),xt,vt,Rt,VRt);
-        pos = ((Rt.inverse())*((P - xt).transpose())).transpose();
-        sqrd = tree.squared_distance(V,F,pos,k,c);
-        if (UV.rows()==0) {
-            input_data.row(i) << CV_argmins(i), 0.0, normals(k,0), normals(k,1), normals(k,2);
-        }else{
-            Eigen::MatrixXd B;
-            igl::barycentric_coordinates(c,V.row(F(k,0)), V.row(F(k,1)), V.row(F(k,2)), B);
-            Eigen::Vector2d uv = (B(0)*UV.row(UVF(k,0)) + B(1)*UV.row(UVF(k,1)) + B(2)*UV.row(UVF(k,2)))/1.0;
-            input_data.row(i) << uv(0), uv(1), normals(k,0), normals(k,1), normals(k,2);
-        }
+    if (compute_extras) {
+        std::cout << "Continuation took "<< tictoc() <<" second(s)."<< std::endl;
+        std::cout << "Number of (unique) vertices: " << CV.rows() << std::endl;
+        std::cout << "Gradient descent queries: " << grad_descent_queries << std::endl;
+        std::cout << "Gradient descent queries per vertex: " << ((double) grad_descent_queries)/( (double) CV.rows()) << std::endl;
+        std::cout << "Distance queries: " << distance_queries << std::endl;
+        std::cout << "Distance queries per vertex: " << ((double) distance_queries)/( (double) CV.rows()) << std::endl;
     }
-    
-    
-    std::string make_dir = "mkdir ";
-    std::system((make_dir + dir_name).c_str());
+    if (compute_extras) {
+        std::string make_dir = "mkdir ";
+        std::system((make_dir + dir_name).c_str());
+    }
     Eigen::MatrixXd Umc;
     Eigen::MatrixXi Gmc;
 
@@ -647,18 +626,26 @@ static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eige
         if (std::getenv("SV_MC_ROOTFIND"))
             refine_mc_crossings(U, CV, CV_argmins, eps, sdf_at);
     }
-    std::cout << "Contouring ("
-              << (contouring == ContouringMethod::DualContouring ? "DC" : "MC")
-              << ") took " << igl::get_seconds() - t_contour0 << " second(s)." << std::endl;
+    if (compute_extras)
+        std::cout << "Contouring ("
+                  << (contouring == ContouringMethod::DualContouring ? "DC" : "MC")
+                  << ") took " << igl::get_seconds() - t_contour0 << " second(s)." << std::endl;
 
+
+    // Everything below is optional (off by default): it writes debug meshes and
+    // computes the strobo/stamping baseline, neither of which affects the output
+    // mesh (U, G).
+    if (!compute_extras) {
+        return;
+    }
 
     igl::writeOBJ(dir_name + "/input.obj",V,F);
     if (TransformationsPtr) {
         write_transformation(dir_name + "/transformations.dmat",*TransformationsPtr);
     }
     igl::writeOBJ(dir_name + "/ours.obj",U,G);
-    
-    
+
+
     // Strobo (stamping baseline for comparison; not part of our output)
     const double t_strobo0 = igl::get_seconds();
     const auto & transform_affine = [&](const double t)->Eigen::Affine3d
@@ -721,30 +708,30 @@ static void run(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eige
 // ---------------------------------------------------------------------------
 
 // Functor-driven (with UVs)
-void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const SweptTransform & transform, const double eps, const int num_seeds, const std::string dir_name, const ContouringMethod contouring, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
-    run(V,F,UV,UVF,transform,eps,num_seeds,dir_name,contouring,nullptr,U,G,strobo_V_list,strobo_F_list);
+void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const SweptTransform & transform, const double eps, const int num_seeds, const std::string dir_name, const ContouringMethod contouring, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list, const bool compute_extras){
+    run(V,F,UV,UVF,transform,eps,num_seeds,dir_name,contouring,nullptr,U,G,strobo_V_list,strobo_F_list,compute_extras);
 }
 
 // Functor-driven (no UVs)
-void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const SweptTransform & transform, const double eps, const int num_seeds, const std::string dir_name, const ContouringMethod contouring, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
+void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const SweptTransform & transform, const double eps, const int num_seeds, const std::string dir_name, const ContouringMethod contouring, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list, const bool compute_extras){
     Eigen::MatrixXd UV(0,0);
     Eigen::MatrixXi UVF(0,0);
-    run(V,F,UV,UVF,transform,eps,num_seeds,dir_name,contouring,nullptr,U,G,strobo_V_list,strobo_F_list);
+    run(V,F,UV,UVF,transform,eps,num_seeds,dir_name,contouring,nullptr,U,G,strobo_V_list,strobo_F_list,compute_extras);
 }
 
 // Keyframe (with UVs) -- MarchingCubes, backwards compatible
-void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const std::vector<Eigen::Matrix4d> Transformations, const double eps, const int num_seeds, const std::string dir_name, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
+void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const Eigen::MatrixXd & UV, const Eigen::MatrixXi & UVF, const std::vector<Eigen::Matrix4d> Transformations, const double eps, const int num_seeds, const std::string dir_name, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list, const bool compute_extras){
     SweptTransform tf = make_keyframe_transform(Transformations);
-    run(V,F,UV,UVF,tf,eps,num_seeds,dir_name,ContouringMethod::MarchingCubes,&Transformations,U,G,strobo_V_list,strobo_F_list);
+    run(V,F,UV,UVF,tf,eps,num_seeds,dir_name,ContouringMethod::MarchingCubes,&Transformations,U,G,strobo_V_list,strobo_F_list,compute_extras);
 }
 
 // Keyframe (no UVs) -- MarchingCubes, backwards compatible
-void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const std::vector<Eigen::Matrix4d> Transformations, const double eps, const int num_seeds, const std::string dir_name, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list){
+void swept_volume(const Eigen::MatrixXd & V, const Eigen::MatrixXi & F, const std::vector<Eigen::Matrix4d> Transformations, const double eps, const int num_seeds, const std::string dir_name, Eigen::MatrixXd & U, Eigen::MatrixXi & G, std::vector<Eigen::MatrixXd> & strobo_V_list, std::vector<Eigen::MatrixXi> & strobo_F_list, const bool compute_extras){
     Eigen::MatrixXd UV;
     UV.resize(0,0);
     Eigen::MatrixXi UVF;
     UVF.resize(0,0);
-    swept_volume(V,F,UV,UVF,Transformations,eps,num_seeds,dir_name,U,G,strobo_V_list,strobo_F_list);
+    swept_volume(V,F,UV,UVF,Transformations,eps,num_seeds,dir_name,U,G,strobo_V_list,strobo_F_list,compute_extras);
 }
 
 
